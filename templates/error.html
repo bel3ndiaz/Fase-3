@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block titulo %}Error{% endblock %}
+{% block contenido %}
+<h1>No se pudo acceder a la base de datos</h1>
+<p class="error">Verifica que MySQL esté iniciado en XAMPP y que la base
+<strong>biblioteca_impresos</strong> exista (importa <code>crear_bd.sql</code> en phpMyAdmin).</p>
+<p>Detalle técnico: {{ detalle }}</p>
+<p><a class="enlace-boton" href="{{ url_for('listar') }}">Reintentar</a></p>
+{% endblock %}
