@@ -1,6 +1,6 @@
 """
 Biblioteca Digital de Instrucciones de Trabajo - Impresos Múltiples
-Desafío 2
+Fase 3: documentos PDF/Word guardados en MySQL con historial de versiones
 """
 import mysql.connector
 from datetime import date
@@ -10,6 +10,15 @@ from flask import (Flask, render_template, request, redirect, url_for,
 
 app = Flask(__name__)
 app.secret_key = "clave-solo-para-mensajes-flash"
+
+
+EXTENSIONES_PERMITIDAS = ["pdf", "doc", "docx"]
+TAMANO_MAXIMO_MB = 5
+TAMANO_MAXIMO = TAMANO_MAXIMO_MB * 1024 * 1024  # en bytes
+# Límite duro de toda la petición: si alguien envía algo enorme, Flask lo corta
+# antes de leerlo (error 413). Los archivos entre 5 y 16 MB llegan y se rechazan
+# en la validación con un mensaje en el mismo formulario.
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 AREAS = [
     "Impresión Offset",
@@ -30,6 +39,11 @@ def conectar():
         user="root",
         password="",
         database="biblioteca_impresos",
+        # buffered: cada consulta se lee completa al ejecutarla, así se pueden
+        # hacer varias consultas seguidas con el mismo cursor sin el error
+        # "Unread result found" (por ejemplo: buscar la instrucción y luego
+        # calcular MAX(version) antes de insertar el documento).
+        buffered=True,
     )
 
 
@@ -72,6 +86,24 @@ def validar_enlace(enlace):
     if enlace != "" and not (enlace.startswith("http://") or enlace.startswith("https://")):
         return ["El enlace de video debe comenzar con http:// o https:// (o dejarse vacío)."]
     return []
+
+
+def limite_paquete_mysql(cursor):
+    """Bytes que MySQL acepta en una sola consulta (max_allowed_packet).
+    En XAMPP suele ser 1 MB; si el archivo no cabe, MySQL corta la conexión."""
+    cursor.execute("SELECT @@max_allowed_packet AS limite")
+    fila = cursor.fetchone()
+    if isinstance(fila, dict):
+        return int(fila["limite"])
+    return int(fila[0])
+
+
+@app.errorhandler(413)
+def archivo_demasiado_grande(error):
+    """La petición superó MAX_CONTENT_LENGTH: no se guarda nada."""
+    flash("El archivo es demasiado grande. El máximo permitido es "
+          + str(TAMANO_MAXIMO_MB) + " MB.", "error")
+    return redirect(request.referrer or url_for("listar"))
 
 
 @app.errorhandler(mysql.connector.Error)
@@ -258,13 +290,23 @@ def eliminar(id):
         "SELECT COUNT(*) AS total FROM historial_versiones WHERE instruccion_id = %s", (id,))
     total_versiones = cursor.fetchone()["total"]
 
-    # Solo se borra la instrucción: ON DELETE CASCADE borra sus versiones
-    cursor.execute("DELETE FROM instrucciones WHERE id = %s", (id,))
-    conexion.commit()
+    # Las llaves foráneas son ON DELETE RESTRICT: si la instrucción tiene
+    # historial o documentos, MySQL rechaza el DELETE con un IntegrityError.
+    try:
+        cursor.execute("DELETE FROM instrucciones WHERE id = %s", (id,))
+        conexion.commit()
+        flash("Instrucción " + fila["codigo"] + " eliminada.")
+    except mysql.connector.Error as error:
+        # 1451 (o 1217 en versiones viejas): MySQL no deja borrar porque hay filas
+        # relacionadas (ON DELETE RESTRICT). Cualquier otro error se deja pasar.
+        if error.errno not in (1451, 1217):
+            raise
+        conexion.rollback()
+        flash("No se puede eliminar " + fila["codigo"] + ": tiene " + str(total_versiones)
+              + " versión(es) en su historial y la base de datos las protege (ON DELETE RESTRICT).",
+              "error")
     cursor.close()
     conexion.close()
-    flash("Instrucción " + fila["codigo"] + " eliminada. Versiones eliminadas en cascada: "
-          + str(total_versiones) + ".")
     return redirect(url_for("listar"))
 
 
