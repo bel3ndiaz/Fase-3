@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block titulo %}Instrucciones{% endblock %}
+{% block contenido %}
+<h1>Instrucciones de trabajo</h1>
+
+{# Los tres filtros viajan por la URL (GET): así el CSV y el listado usan los mismos #}
+<form method="GET" action="{{ url_for('listar') }}" class="busqueda">
+  <input type="text" name="q" value="{{ q }}" placeholder="Buscar por código, título o área" aria-label="Buscar">
+  <select name="area" aria-label="Filtrar por área">
+    <option value="">Todas las áreas</option>
+    {% for a in areas %}
+    <option value="{{ a }}" {% if area == a %}selected{% endif %}>{{ a }}</option>
+    {% endfor %}
+  </select>
+  <select name="avance" aria-label="Filtrar por avance">
+    <option value="">Todo el avance</option>
+    {% for clave, titulo in avances.items() %}
+    <option value="{{ clave }}" {% if avance == clave %}selected{% endif %}>{{ titulo }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Filtrar</button>
+  {% if q or area or avance %}<a class="enlace-boton secundario" href="{{ url_for('listar') }}">Limpiar</a>{% endif %}
+</form>
+
+<div class="barra-resultados">
+  <p class="conteo">{{ instrucciones|length }} instrucción(es){% if q or area or avance %} con los filtros aplicados{% endif %}</p>
+  {% if instrucciones %}
+  <a class="enlace-boton exportar" href="{{ url_for('exportar_csv', q=q or None, area=area or None, avance=avance or None) }}">Exportar a CSV</a>
+  {% endif %}
+</div>
+
+{% if instrucciones %}
+<table>
+  <thead>
+    <tr>
+      <th>Código</th><th>Título</th><th>Área</th>
+      <th>Versión</th><th>Vigente</th><th>Actualizada</th><th>Estado</th><th>Acciones</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for item in instrucciones %}
+    {% set i = item.datos %}
+    <tr class="{{ item.estado }}">
+      <td>{{ i.codigo }}</td>
+      <td><a href="{{ url_for('detalle', id=i.id) }}">{{ i.titulo }}</a></td>
+      <td>{{ i.area }}</td>
+      <td>v{{ i.version }}</td>
+      <td>v{{ i.version_vigente }}</td>
+      <td>{{ i.fecha_actualizacion|fecha }}</td>
+      <td>
+        {% if item.estado == "vigente" %}<span class="etiqueta vigente">Vigente</span>
+        {% elif item.estado == "desactualizada" %}<span class="etiqueta desactualizada">Desactualizada</span>
+        {% else %}<span class="etiqueta por_revisar">Por revisar</span>{% endif %}
+      </td>
+      <td class="acciones">
+        <a class="enlace-boton" href="{{ url_for('editar', id=i.id) }}">Modificar</a>
+        <form method="POST" action="{{ url_for('eliminar', id=i.id) }}"
+              onsubmit='return confirm({{ ("¿Eliminar la instrucción " ~ i.codigo ~ "? Esta acción no se puede deshacer.")|tojson }});'>
+          <button type="submit" class="peligro">Eliminar</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="vacio">No hay instrucciones que coincidan.</p>
+{% endif %}
+{% endblock %}

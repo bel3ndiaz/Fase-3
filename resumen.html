@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block titulo %}Resumen{% endblock %}
+{% block contenido %}
+<h1>Resumen de avance</h1>
+<p class="intro">Estado real de la biblioteca: cuántas instrucciones ya tienen su documento (PDF o Word) y su video, y cuáles todavía están pendientes.</p>
+
+<div class="indicadores">
+  <div class="indicador">
+    <span class="valor" id="total">{{ total }}</span>
+    <span class="etiqueta-ind">Instrucciones</span>
+  </div>
+  <div class="indicador">
+    <span class="valor">{{ con_documento }}<small> / {{ total }}</small></span>
+    <span class="etiqueta-ind">Con documento</span>
+  </div>
+  <div class="indicador">
+    <span class="valor">{{ con_video }}<small> / {{ total }}</small></span>
+    <span class="etiqueta-ind">Con video</span>
+  </div>
+  <div class="indicador destacado">
+    <span class="valor">{{ porcentaje_global }}%</span>
+    <span class="etiqueta-ind">Completas ({{ grupos.completa|length }})</span>
+  </div>
+</div>
+<p class="ayuda">{{ total_versiones }} versión(es) de documentos guardadas en total.</p>
+
+<h2>Instrucciones por grupo</h2>
+<div class="tarjetas">
+  {% for clave, titulo in titulos.items() %}
+  <section class="tarjeta {{ clave }}">
+    <h3>{{ titulo }}</h3>
+    <p class="numero">{{ grupos[clave]|length }}</p>
+    {% if grupos[clave] %}
+    <ul>
+      {% for f in grupos[clave] %}
+      <li>
+        <a href="{{ url_for('detalle', id=f.id) }}">{{ f.codigo }}</a> · {{ f.titulo }}
+        {% if clave in ('falta_documento', 'sin_nada') %}
+          {% if ruta_existe('subir') %}<a class="accion" href="{{ url_for('subir', id=f.id) }}">Subir documento</a>{% endif %}
+        {% elif clave == 'falta_video' %}
+          <a class="accion" href="{{ url_for('editar', id=f.id) }}">Agregar enlace</a>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <a class="ver-listado" href="{{ url_for('listar', avance=clave) }}">Ver en el listado →</a>
+    {% else %}
+    <p class="vacio">Ninguna instrucción en este grupo.</p>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+
+<h2>Avance por área</h2>
+<p class="ayuda">El avance es el porcentaje de instrucciones del área que ya tienen documento y video.</p>
+<div class="tabla-contenedor">
+<table class="avance-area">
+  <thead>
+    <tr><th>Área</th><th>Instrucciones</th><th>Con documento</th><th>Con video</th><th>Completas</th><th class="col-avance">Avance</th></tr>
+  </thead>
+  <tbody>
+  {% for a in areas %}
+    <tr>
+      <td><a href="{{ url_for('listar', area=a.area) }}">{{ a.area }}</a></td>
+      {% if a.total %}
+      <td>{{ a.total }}</td>
+      <td>{{ a.con_documento }}</td>
+      <td>{{ a.con_video }}</td>
+      <td>{{ a.completas }}</td>
+      <td class="col-avance">
+        <div class="barra" role="progressbar" aria-valuenow="{{ a.porcentaje }}" aria-valuemin="0" aria-valuemax="100"
+             aria-label="Avance de {{ a.area }}">
+          <div class="barra-relleno {% if a.porcentaje == 100 %}completa{% elif a.porcentaje == 0 %}vacia{% endif %}" style="width: {{ a.porcentaje }}%"></div>
+        </div>
+        <span class="porcentaje">{{ a.porcentaje }}%</span>
+      </td>
+      {% else %}
+      <td colspan="5"><span class="vacio">Sin instrucciones registradas</span></td>
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

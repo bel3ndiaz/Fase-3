@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block titulo %}Biblioteca Digital{% endblock %} | Impresos Múltiples</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="encabezado">
+  <div class="marca">Impresos Múltiples <span>Biblioteca Digital de Instrucciones de Trabajo</span></div>
+  {# La sección actual se resalta según la ruta que se está mostrando #}
+  {% set ruta = request.endpoint %}
+  <nav aria-label="Principal">
+    <a href="{{ url_for('listar') }}" {% if ruta in ('listar', 'detalle', 'editar', 'subir') %}class="activo" aria-current="page"{% endif %}>Instrucciones</a>
+    <a href="{{ url_for('nuevo') }}" {% if ruta == 'nuevo' %}class="activo" aria-current="page"{% endif %}>Registrar</a>
+    <a href="{{ url_for('resumen') }}" {% if ruta == 'resumen' %}class="activo" aria-current="page"{% endif %}>Resumen</a>
+  </nav>
+</header>
+<main>
+  {# Cada mensaje trae su categoría: "error" se muestra en rojo, el resto en verde #}
+  {% for categoria, mensaje in get_flashed_messages(with_categories=true) %}
+  <p class="{{ 'error' if categoria == 'error' else 'exito' }}" role="{{ 'alert' if categoria == 'error' else 'status' }}">{{ mensaje }}</p>
+  {% endfor %}
+  {% block contenido %}{% endblock %}
+</main>
+</body>
+</html>

@@ -2,14 +2,31 @@
 Biblioteca Digital de Instrucciones de Trabajo - Impresos Múltiples
 Fase 3: documentos PDF/Word guardados en MySQL con historial de versiones
 """
+import csv
+import io
+import os
+import re
 import mysql.connector
 from datetime import date
 
 from flask import (Flask, render_template, request, redirect, url_for,
-                   flash, abort)
+                   flash, abort, Response)
 
 app = Flask(__name__)
-app.secret_key = "clave-solo-para-mensajes-flash"
+
+# ---------------------------------------------------------------------
+# Configuración. Los valores por defecto sirven para XAMPP en local; en otro
+# entorno se cambian con variables de entorno, sin tocar el código ni subir
+# contraseñas al repositorio (que es público).
+#   SECRET_KEY, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, FLASK_DEBUG (0 = apagado)
+# ---------------------------------------------------------------------
+app.secret_key = os.environ.get("SECRET_KEY", "clave-solo-para-desarrollo-local")
+DB_CONFIG = {
+    "host": os.environ.get("DB_HOST", "localhost"),
+    "user": os.environ.get("DB_USER", "root"),
+    "password": os.environ.get("DB_PASSWORD", ""),
+    "database": os.environ.get("DB_NAME", "biblioteca_impresos"),
+}
 
 
 EXTENSIONES_PERMITIDAS = ["pdf", "doc", "docx"]
@@ -35,10 +52,7 @@ AREAS = [
 
 def conectar():
     return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="",
-        database="biblioteca_impresos",
+        **DB_CONFIG,
         # buffered: cada consulta se lee completa al ejecutarla, así se pueden
         # hacer varias consultas seguidas con el mismo cursor sin el error
         # "Unread result found" (por ejemplo: buscar la instrucción y luego
@@ -66,6 +80,32 @@ def clasificar(version, version_vigente):
         return "desactualizada"
     else:
         return "por_revisar"
+
+
+# Avance de cada instrucción según lo REALMENTE cargado: documento (tabla
+# archivos) y video (enlace). Es la misma clasificación para /resumen, para el
+# filtro del listado y para el CSV.
+AVANCES = {
+    "completa": "Con documento y video",
+    "falta_video": "Falta el video",
+    "falta_documento": "Falta el documento",
+    "sin_nada": "Sin documento ni video",
+}
+
+
+def clasificar_avance(tiene_documento, tiene_video):
+    """Decide en qué grupo de avance cae una instrucción (if/elif/else)."""
+    if tiene_documento and tiene_video:
+        return "completa"
+    elif tiene_documento:
+        return "falta_video"
+    elif tiene_video:
+        return "falta_documento"
+    else:
+        return "sin_nada"
+
+
+PATRON_CODIGO = re.compile(r"^[A-Z0-9]+(-[A-Z0-9]+)*$")
 
 
 def es_version_valida(texto):
@@ -118,28 +158,143 @@ def inicio():
 
 
 
-@app.route("/instrucciones")
-def listar():
+# Columnas del listado. El documento vigente es la versión más reciente de la
+# tabla archivos. Nunca se pide la columna contenido (LONGBLOB).
+COLUMNAS_LISTADO = (
+    "SELECT i.id, i.codigo, i.titulo, i.area, i.version, i.version_vigente, "
+    "i.enlace_video, i.fecha_actualizacion, "
+    "a.version AS version_actual, a.nombre_original AS archivo_vigente, "
+    "a.extension, a.tamano_bytes, a.fecha_subida, "
+    "(SELECT COUNT(*) FROM archivos x WHERE x.instruccion_id = i.id) AS total_versiones "
+    "FROM instrucciones i "
+    "LEFT JOIN archivos a ON a.instruccion_id = i.id "
+    "AND a.version = (SELECT MAX(m.version) FROM archivos m WHERE m.instruccion_id = i.id) "
+)
+
+
+def filtros_desde_url():
+    """Lee los filtros del listado (?q=&area=&avance=). Un valor que no existe en las
+    listas se ignora. Los usan el listado y el CSV, así siempre coinciden."""
     texto = request.args.get("q", "").strip()
+    area = request.args.get("area", "").strip()
+    avance = request.args.get("avance", "").strip()
+    if area not in AREAS:
+        area = ""
+    if avance not in AVANCES:
+        avance = ""
+    return texto, area, avance
+
+
+def consultar_instrucciones(texto="", area="", avance=""):
+    """Instrucciones (con su documento vigente) que cumplen los filtros dados.
+    Cada fila trae la clave 'avance' calculada con clasificar_avance()."""
+    condiciones = []
+    parametros = []
+    if texto != "":
+        # \\, % y _ del texto se escapan para que se busquen tal cual
+        limpio = texto.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        patron = "%" + limpio + "%"
+        condiciones.append("(i.titulo LIKE %s OR i.codigo LIKE %s OR i.area LIKE %s)")
+        parametros.extend([patron, patron, patron])
+    if area != "":
+        condiciones.append("i.area = %s")
+        parametros.append(area)
+    consulta = COLUMNAS_LISTADO
+    if condiciones:
+        consulta += "WHERE " + " AND ".join(condiciones) + " "
+    consulta += "ORDER BY i.codigo"
+
     conexion = conectar()
     cursor = conexion.cursor(dictionary=True)
-    if texto == "":
-        cursor.execute("SELECT * FROM instrucciones ORDER BY codigo")
-    else:
-        patron = "%" + texto + "%"
-        cursor.execute(
-            "SELECT * FROM instrucciones "
-            "WHERE titulo LIKE %s OR codigo LIKE %s OR area LIKE %s ORDER BY codigo",
-            (patron, patron, patron))
+    cursor.execute(consulta, tuple(parametros))
     filas = cursor.fetchall()
     cursor.close()
     conexion.close()
 
+    resultado = []
+    for fila in filas:
+        fila["avance"] = clasificar_avance(fila["version_actual"] is not None,
+                                           bool(fila["enlace_video"]))
+        # El avance se filtra aquí (no en SQL) para usar una sola regla en todo el sistema
+        if avance == "" or fila["avance"] == avance:
+            resultado.append(fila)
+    return resultado
+
+
+@app.route("/instrucciones")
+def listar():
+    texto, area, avance = filtros_desde_url()
+    filas = consultar_instrucciones(texto, area, avance)
     instrucciones = []
     for fila in filas:
+        # "estado" (regla de vigencia del Desafío 2) se conserva para el listado actual
         estado = clasificar(fila["version"], fila["version_vigente"])
         instrucciones.append({"datos": fila, "estado": estado})
-    return render_template("listado.html", instrucciones=instrucciones, q=texto)
+    return render_template("listado.html", instrucciones=instrucciones, q=texto,
+                           area=area, avance=avance, areas=AREAS, avances=AVANCES)
+
+
+# Encabezados del CSV, en el mismo orden en que se escriben las columnas
+ENCABEZADOS_CSV = [
+    "Código", "Título", "Área", "Avance", "Documento vigente", "Tipo",
+    "Versión vigente", "Total de versiones", "Tamaño", "Documento subido el",
+    "Enlace de video", "Última actualización",
+]
+
+
+def celda_csv(valor):
+    """Texto seguro para una celda de CSV. Excel ejecuta como fórmula lo que empieza
+    con = + - @, así que se antepone una comilla para que se lea como texto."""
+    if valor is None:
+        return ""
+    texto = str(valor)
+    if texto[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + texto
+    return texto
+
+
+def tamano_csv(num_bytes):
+    """850 KB o 1.2 MB. Propio del CSV: no depende de los filtros de plantilla."""
+    if num_bytes < 1024 * 1024:
+        return str(max(1, round(num_bytes / 1024))) + " KB"
+    return str(round(num_bytes / (1024 * 1024), 1)) + " MB"
+
+
+def fecha_hora_csv(valor):
+    """15/10/2026 14:05"""
+    if hasattr(valor, "strftime"):
+        return valor.strftime("%d/%m/%Y %H:%M")
+    return str(valor)
+
+
+@app.route("/instrucciones/exportar.csv")
+def exportar_csv():
+    """Descarga el listado como CSV aplicando los MISMOS filtros que el listado."""
+    texto, area, avance = filtros_desde_url()
+    filas = consultar_instrucciones(texto, area, avance)
+
+    salida = io.StringIO()
+    escritor = csv.writer(salida)
+    escritor.writerow(ENCABEZADOS_CSV)
+    for f in filas:
+        tiene_doc = f["version_actual"] is not None
+        escritor.writerow([celda_csv(valor) for valor in [
+            f["codigo"], f["titulo"], f["area"], AVANCES[f["avance"]],
+            f["archivo_vigente"],
+            f["extension"].upper() if tiene_doc else None,
+            ("v" + str(f["version_actual"])) if tiene_doc else None,
+            f["total_versiones"],
+            tamano_csv(f["tamano_bytes"]) if tiene_doc else None,
+            fecha_hora_csv(f["fecha_subida"]) if tiene_doc else None,
+            f["enlace_video"],
+            formato_fecha(f["fecha_actualizacion"]),
+        ]])
+
+    # utf-8-sig agrega la marca BOM: así Excel muestra bien las tildes y la ñ
+    contenido = salida.getvalue().encode("utf-8-sig")
+    nombre = "instrucciones_" + date.today().isoformat() + ".csv"
+    return Response(contenido, mimetype="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=" + nombre})
 
 
 @app.route("/instrucciones/<int:id>")
@@ -189,6 +344,8 @@ def nuevo():
             errores.append("El código es obligatorio.")
         elif len(codigo) > 20:
             errores.append("El código no puede tener más de 20 caracteres.")
+        elif not PATRON_CODIGO.match(codigo):
+            errores.append("El código solo puede tener letras, números y guiones (ej. IM-OFF-003).")
         if titulo == "":
             errores.append("El título es obligatorio.")
         elif len(titulo) > 100:
@@ -311,49 +468,79 @@ def eliminar(id):
 
 
 
+@app.context_processor
+def utilidades_plantillas():
+    """Permite que una plantilla enlace a una ruta solo si ya existe en la aplicación
+    (así /resumen no falla mientras otra parte del equipo aún no integra 'subir')."""
+    return {"ruta_existe": lambda nombre: nombre in app.view_functions}
+
+
 @app.route("/resumen")
 def resumen():
-    conexion = conectar()
-    cursor = conexion.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM instrucciones ORDER BY codigo")
-    filas = cursor.fetchall()
-    cursor.close()
-    conexion.close()
+    filas = consultar_instrucciones()
 
-    # Contadores
-    total_vigentes = 0
-    total_desactualizadas = 0
-    total_por_revisar = 0
-    # Listas para mostrar cuáles instrucciones cayeron en cada clasificación
-    vigentes = []
-    desactualizadas = []
-    por_revisar = []
+    # Una lista por cada grupo de avance, para mostrar cuáles instrucciones cayeron en él
+    grupos = {clave: [] for clave in AVANCES}
+    # Avance por área: se incluyen todas las áreas, aunque todavía no tengan instrucciones
+    por_area = {}
+    for nombre in AREAS:
+        por_area[nombre] = {"area": nombre, "total": 0, "con_documento": 0,
+                            "con_video": 0, "completas": 0}
 
-    # Repetición: se recorre cada registro de la base de datos
+    con_documento = 0
+    con_video = 0
+    total_versiones = 0
+
+    # Repetición: se recorre cada instrucción una sola vez
     for fila in filas:
-        # Decisión: se compara la versión del documento con la versión vigente
-        if fila["version"] == fila["version_vigente"]:
-            total_vigentes = total_vigentes + 1
-            vigentes.append(fila)
-        elif fila["version"] < fila["version_vigente"]:
-            total_desactualizadas = total_desactualizadas + 1
-            desactualizadas.append(fila)
+        grupos[fila["avance"]].append(fila)
+
+        tiene_documento = fila["version_actual"] is not None
+        tiene_video = bool(fila["enlace_video"])
+        total_versiones = total_versiones + fila["total_versiones"]
+        if tiene_documento:
+            con_documento = con_documento + 1
+        if tiene_video:
+            con_video = con_video + 1
+
+        if fila["area"] not in por_area:  # área que ya no está en la lista oficial
+            por_area[fila["area"]] = {"area": fila["area"], "total": 0, "con_documento": 0,
+                                      "con_video": 0, "completas": 0}
+        datos_area = por_area[fila["area"]]
+        datos_area["total"] = datos_area["total"] + 1
+        if tiene_documento:
+            datos_area["con_documento"] = datos_area["con_documento"] + 1
+        if tiene_video:
+            datos_area["con_video"] = datos_area["con_video"] + 1
+        if fila["avance"] == "completa":
+            datos_area["completas"] = datos_area["completas"] + 1
+
+    # Porcentaje de avance = instrucciones completas / instrucciones del área
+    areas = []
+    for datos_area in por_area.values():
+        if datos_area["total"] > 0:
+            datos_area["porcentaje"] = round(100 * datos_area["completas"] / datos_area["total"])
         else:
-            # La versión cargada es mayor que la vigente: dato inconsistente
-            total_por_revisar = total_por_revisar + 1
-            por_revisar.append(fila)
+            datos_area["porcentaje"] = 0
+        areas.append(datos_area)
+
+    total = len(filas)
+    porcentaje_global = round(100 * len(grupos["completa"]) / total) if total > 0 else 0
 
     return render_template(
         "resumen.html",
-        total=len(filas),
-        total_vigentes=total_vigentes,
-        total_desactualizadas=total_desactualizadas,
-        total_por_revisar=total_por_revisar,
-        vigentes=vigentes,
-        desactualizadas=desactualizadas,
-        por_revisar=por_revisar,
+        total=total,
+        con_documento=con_documento,
+        con_video=con_video,
+        total_versiones=total_versiones,
+        porcentaje_global=porcentaje_global,
+        grupos=grupos,
+        titulos=AVANCES,
+        areas=areas,
     )
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # El modo debug queda encendido por defecto para desarrollar en local.
+    # Para apagarlo: FLASK_DEBUG=0
+    app.run(debug=os.environ.get("FLASK_DEBUG", "1") == "1")
