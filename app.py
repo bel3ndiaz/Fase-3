@@ -357,3 +357,72 @@ def resumen():
 
 if __name__ == "__main__":
     app.run(debug=True)
+  # PARTE 3 - MI MEJORA: búsqueda por nombre de archivo + filtros por área y estado
+# En app.py reemplazo SOLO la función listar() por esta.
+# (COLUMNAS_LISTADO, AREAS y conectar() ya existen, no los toco.)
+
+
+@app.route("/instrucciones")
+def listar():
+    # Lo que la persona escribió o eligió en el formulario (viene en la URL)
+    texto = request.args.get("q", "").strip()
+    area = request.args.get("area", "").strip()
+    estado = request.args.get("estado", "").strip()
+
+    # Voy armando el WHERE pedazo por pedazo. Solo agrego un pedazo
+    # si la persona usó ese filtro.
+    condiciones = []
+    valores = []
+
+    if texto != "":
+        patron = "%" + texto + "%"
+        # Busca en título, código, área y también en el nombre de cualquier
+        # versión del archivo. EXISTS pregunta: "¿hay al menos un archivo
+        # de esta instrucción cuyo nombre se parezca a lo que escribió?"
+        condiciones.append(
+            "(i.titulo LIKE %s OR i.codigo LIKE %s OR i.area LIKE %s OR EXISTS "
+            "(SELECT 1 FROM archivos a WHERE a.instruccion_id = i.id "
+            "AND a.nombre_original LIKE %s))")
+        valores.extend([patron, patron, patron, patron])
+
+    # Solo acepto áreas que estén en mi lista AREAS (así nadie inventa una por la URL)
+    if area in AREAS:
+        condiciones.append("i.area = %s")
+        valores.append(area)
+
+    # Filtro por estado: uso la misma regla del detalle
+    # (la versión más alta es vigente, las demás son obsoletas)
+    if estado == "vigente":
+        # Tiene documento, y la versión más reciente siempre es la vigente
+        condiciones.append(
+            "EXISTS (SELECT 1 FROM archivos a WHERE a.instruccion_id = i.id)")
+    elif estado == "obsoleta":
+        # Tiene alguna versión más vieja que la más reciente
+        condiciones.append(
+            "EXISTS (SELECT 1 FROM archivos a WHERE a.instruccion_id = i.id "
+            "AND a.version < (SELECT MAX(b.version) FROM archivos b "
+            "WHERE b.instruccion_id = i.id))")
+    elif estado == "sin_documento":
+        condiciones.append(
+            "NOT EXISTS (SELECT 1 FROM archivos a WHERE a.instruccion_id = i.id)")
+    else:
+        estado = ""  # valor raro en la URL: lo ignoro
+
+    consulta = COLUMNAS_LISTADO
+    if len(condiciones) > 0:
+        consulta = consulta + "WHERE " + " AND ".join(condiciones) + " "
+    consulta = consulta + "ORDER BY i.codigo"
+
+    conexion = conectar()
+    cursor = conexion.cursor(dictionary=True)
+    cursor.execute(consulta, valores)  # los %s los llena mysql.connector (evita inyección SQL)
+    filas = cursor.fetchall()
+    cursor.close()
+    conexion.close()
+
+    instrucciones = []
+    for fila in filas:
+        instrucciones.append({"datos": fila})
+
+    return render_template("listado.html", instrucciones=instrucciones,
+                           q=texto, area=area, estado=estado, areas=AREAS)
